@@ -44,12 +44,18 @@ let run (`Main_module main_module) (`Unwrapped_library unwrapped)
     (`Ref_cmi reference) (`Current_cmi current) =
   let open CCResult.Infix in
   let* reference_map, current_map =
+    (* Format.printf "Starting\n%!"; *)
     let* curr_mode = mode ~reference ~current ~main_module ~unwrapped in
     match curr_mode with
     | Wrapped main_module ->
         let main_module = String.capitalize_ascii main_module in
-        let+ reference_map = Api_watch.Library.load ~main_module reference
+        (* Format.printf "Loading ref module\n%!"; *)
+        let+ reference_map =
+          let res = Api_watch.Library.load ~main_module reference in
+          (* Format.printf "Finished loading ref module\n%!"; *)
+          res
         and+ current_map = Api_watch.Library.load ~main_module current in
+        (* Format.printf "Finished loading current module\n%!"; *)
         (reference_map, current_map)
     | Unwrapped ->
         let+ reference_map = Api_watch.Library.load_unwrapped reference
@@ -66,6 +72,7 @@ let run (`Main_module main_module) (`Unwrapped_library unwrapped)
         in
         (reference_map, current_map)
   in
+  (* Format.printf "Computing diff\n%!"; *)
   let diff_map =
     Api_watch.Diff.library ~reference:reference_map ~current:current_map
     |> Api_watch.String_map.bindings

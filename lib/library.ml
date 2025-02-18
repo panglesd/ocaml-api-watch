@@ -31,12 +31,22 @@ let load_cmi file_path =
     Ok (cmi_infos.cmi_sign, cmi_infos.cmi_name)
   with e -> Error (Printexc.to_string e)
 
-(* Attach a module name to its various representations, e.g. a [signature] or a
+type 'a named = { name : string; value : 'a }
+(** Attach a module name to its various representations, e.g. a [signature] or a
    [module_type].
    Mostly used to report lookup failures. *)
-type 'a named = { name : string; value : 'a }
 
-module Flat_path = struct
+(** A module for "flat path", paths without a functor application in them. *)
+module Flat_path : sig
+  type component
+  type t = component list
+
+  val from_path : Path.t -> t option
+  (**  [from_path p] is [None] if [p] contains a functor application. *)
+
+  val modname_from_component : component -> string
+  (* val to_string : t -> string *)
+end = struct
   type component = Id of Ident.t | Comp of string
   type t = component list
 
@@ -46,7 +56,7 @@ module Flat_path = struct
     | `Ok (id, comps) -> Some (Id id :: List.map (fun s -> Comp s) comps)
 
   let modname_from_component = function Id id -> Ident.name id | Comp s -> s
-  let to_string t = String.concat "." (List.map modname_from_component t)
+  (* let to_string t = String.concat "." (List.map modname_from_component t) *)
 end
 
 let rec path_in_module ~module_path flat_path =
@@ -83,6 +93,21 @@ let find_module modname sig_ =
   | Some mty -> Ok mty
   | None -> lookup_error ~path:modname ~module_name:sig_.name
 
+let find_module_type modname sig_ =
+  let open Types in
+  let mty_opt =
+    List.find_map
+      (function
+        | Sig_modtype (id, { mtd_type; _ }, _)
+          when String.equal (Ident.name id) modname ->
+            Some mtd_type
+        | _ -> None)
+      sig_.value
+  in
+  match mty_opt with
+  | Some mty -> Ok mty
+  | None -> lookup_error ~path:modname ~module_name:sig_.name
+
 let rec find_module_in_sig ~library_modules path sig_ =
   let open CCResult.Infix in
   match (path : Flat_path.t) with
@@ -95,31 +120,122 @@ let rec find_module_in_sig ~library_modules path sig_ =
       find_module_in_md_type ~library_modules tl { name = modname; value = mty }
   | [] -> assert false
 
+(* and find_module_type_in_sig ~library_modules path sig_ = *)
+(*   let open CCResult.Infix in *)
+(*   match (path : Flat_path.t) with *)
+(*   | [ last ] -> *)
+(*       let modname = Flat_path.modname_from_component last in *)
+(*       find_module_type modname sig_ *)
+(*   | hd :: tl -> *)
+(*       let modname = Flat_path.modname_from_component hd in *)
+(*       let* mty = find_module modname sig_ in *)
+(*       find_module_type_in_md_type ~library_modules tl *)
+(*         { name = modname; value = mty } *)
+(*   | [] -> assert false *)
+
 and find_module_in_md_type ~library_modules path mty =
   let open CCResult.Infix in
-  match mty.value with
-  | Mty_signature s ->
-      find_module_in_sig ~library_modules path { name = mty.name; value = s }
-  | Mty_ident mty_path | Mty_alias mty_path -> (
-      let* expanded =
-        match Flat_path.from_path mty_path with
-        | None -> Ok None
-        | Some flat_mty_path ->
-            find_module_in_lib ~library_modules flat_mty_path
+  let* sig_ = sig_of_module_type ~library_modules mty.value in
+  match sig_ with
+  | None ->
+      let res =
+        match mty.value with
+        | Mty_alias mty_path | Mty_ident mty_path ->
+            let expanded_path = path_in_module ~module_path:mty_path path in
+            rewrite_mty_path mty.value expanded_path
+        | _ -> mty.value
       in
-      match expanded with
-      | Some expanded_mty ->
-          find_module_in_md_type ~library_modules path
-            { name = Path.name mty_path; value = expanded_mty }
-      | None ->
-          let expanded_path = path_in_module ~module_path:mty_path path in
-          Ok (rewrite_mty_path mty.value expanded_path))
-  | _ -> lookup_error ~path:(Flat_path.to_string path) ~module_name:mty.name
+      Ok res
+  | Some s ->
+      find_module_in_sig ~library_modules path { name = mty.name; value = s }
+(* | Some (Mty_alias mty_path) -> ( *)
+(*     let* expanded = *)
+(*       (\* match Flat_path.from_path mty_path with *\) *)
+(*       (\* | None -> Ok None *\) *)
+(*       (\* | Some flat_mty_path -> *\) *)
+(*       find_module_in_lib ~library_modules (\* flat_ *\) mty_path *)
+(*     in *)
+(*     match expanded with *)
+(*     | Some expanded_mty -> *)
+(*         find_module_in_md_type ~library_modules path *)
+(*           { name = Path.name mty_path; value = expanded_mty } *)
+(*     | None -> *)
+(*         let expanded_path = path_in_module ~module_path:mty_path path in *)
+(*         Ok (rewrite_mty_path mty.value expanded_path)) *)
+(* | Some (Mty_ident mty_path) -> ( *)
+(*     let* expanded = *)
+(*       (\* match Flat_path.from_path mty_path with *\) *)
+(*       (\* | None -> Ok None *\) *)
+(*       (\* | Some flat_mty_path -> *\) *)
+(*       find_module_type_in_lib ~library_modules (\* flat_ *\) mty_path *)
+(*     in *)
+(*     match expanded with *)
+(*     | Some expanded_mty -> *)
+(*         find_module_in_md_type ~library_modules path *)
+(*           { name = Path.name mty_path; value = expanded_mty } *)
+(*     | None -> *)
+(*         let expanded_path = path_in_module ~module_path:mty_path path in *)
+(*         Ok (rewrite_mty_path mty.value expanded_path)) *)
+(* | Some _ -> *)
+(*     lookup_error ~path:(Flat_path.to_string path) ~module_name:mty.name *)
+
+(* and find_module_type_in_md_type ~library_modules path mty = *)
+(*   let open CCResult.Infix in *)
+(*   let* sig_ = sig_of_module_type ~library_modules mty.value in *)
+(*   match sig_ with *)
+(*   | None -> *)
+(*       let res = *)
+(*         match mty.value with *)
+(*         | Mty_alias mty_path | Mty_ident mty_path -> *)
+(*             let expanded_path = path_in_module ~module_path:mty_path path in *)
+(*             rewrite_mty_path mty.value expanded_path *)
+(*         | _ -> mty.value *)
+(*       in *)
+(*       Ok (Some res) *)
+(*   | Some s -> *)
+(*       find_module_type_in_sig ~library_modules path *)
+(*         { name = mty.name; value = s } *)
+
+(* match mty.value with *)
+(* | Mty_signature s -> *)
+(*     find_module_type_in_sig ~library_modules path *)
+(*       { name = mty.name; value = s } *)
+(* | Mty_alias mty_path -> ( *)
+(*     let* expanded = *)
+(*       (\* match Flat_path.from_path mty_path with *\) *)
+(*       (\* | None -> Ok None *\) *)
+(*       (\* | Some flat_mty_path -> *\) *)
+(*       find_module_in_lib ~library_modules (\* flat_mty_path *\) mty_path *)
+(*     in *)
+(*     match expanded with *)
+(*     | Some expanded_mty -> *)
+(*         find_module_type_in_md_type ~library_modules path *)
+(*           { name = Path.name mty_path; value = expanded_mty } *)
+(*     | None -> *)
+(*         let expanded_path = path_in_module ~module_path:mty_path path in *)
+(*         Ok (Some (rewrite_mty_path mty.value expanded_path))) *)
+(* | Mty_ident mty_path -> ( *)
+(*     let* expanded = *)
+(*       (\* match Flat_path.from_path mty_path with *\) *)
+(*       (\* | None -> Ok None *\) *)
+(*       (\* | Some flat_mty_path -> *\) *)
+(*       find_module_type_in_lib ~library_modules (\* flat_ *\) mty_path *)
+(*     in *)
+(*     match expanded with *)
+(*     | Some expanded_mty -> *)
+(*         find_module_type_in_md_type ~library_modules path *)
+(*           { name = Path.name mty_path; value = expanded_mty } *)
+(*     | None -> *)
+(*         let expanded_path = path_in_module ~module_path:mty_path path in *)
+(*         Ok (Some (rewrite_mty_path mty.value expanded_path))) *)
+(* | _ -> lookup_error ~path:(Flat_path.to_string path) ~module_name:mty.name *)
 
 and find_module_in_lib ~library_modules path :
     (Types.module_type option, string) result =
   let open Types in
   let open CCResult.Infix in
+  let ( let> ) x f = match x with None -> Ok None | Some x -> f x in
+  let> path = Flat_path.from_path path in
   match path with
   | [ comp ] ->
       let modname = Flat_path.modname_from_component comp in
@@ -129,54 +245,138 @@ and find_module_in_lib ~library_modules path :
       let modname = Flat_path.modname_from_component comp in
       match get_sig modname library_modules with
       | None -> Ok None
-      | Some parent_sig -> (
+      | Some parent_sig ->
           let* mty =
             find_module_in_sig ~library_modules inner_path
               { name = modname; value = parent_sig }
           in
-          match mty with
-          | Mty_signature _ | Mty_functor _ -> Ok (Some mty)
-          | Mty_ident path' | Mty_alias path' -> (
-              match Flat_path.from_path path' with
-              | None -> Ok (Some mty)
-              | Some fpath -> find_module_in_lib ~library_modules fpath)))
+          let+ res = expand_module_type ~library_modules mty in
+          Some res)
   | _ -> Ok None
 
-let rec expand_sig ~library_modules sig_ =
+and find_module_type_in_lib ~library_modules path :
+    (Types.module_type option, string) result =
+  let open CCResult.Infix in
+  (* let ( let> ) x f = match x with None -> Ok None | Some x -> f x in *)
+  match path with
+  | Path.Pdot (parent_mod_path, mty_name) ->
+      let* parent_mod = find_module_in_lib ~library_modules parent_mod_path in
+      let res =
+        match parent_mod with
+        | None -> Ok None
+        | Some parent_mod ->
+            let* sig_ = sig_of_module_type ~library_modules parent_mod in
+            let res =
+              match sig_ with
+              | None -> Ok None
+              | Some sig_ ->
+                  find_module_type mty_name { name = mty_name; value = sig_ }
+            in
+            res
+      in
+      res
+      (* let> path = Flat_path.from_path path in *)
+      (* match path with *)
+      (* | comp :: inner_path -> ( *)
+      (*     let modname = Flat_path.modname_from_component comp in *)
+      (*     match get_sig modname library_modules with *)
+      (*     | None -> Ok None *)
+      (*     | Some parent_sig -> ( *)
+      (*         let* mty = *)
+      (*           find_module_type_in_sig ~library_modules inner_path *)
+      (*             { name = modname; value = parent_sig } *)
+      (*         in *)
+      (*         match mty with *)
+      (*         | None -> Ok mty *)
+      (*         | Some mty -> *)
+      (*             let+ res = expand_module_type ~library_modules mty in *)
+      (*             Some res *)
+      (*         (\* | Some (Mty_ident path' | Mty_alias path') -> ( *\) *)
+      (*         (\*     match Flat_path.from_path path' with *\) *)
+      (*         (\*     | None -> Ok mty *\) *)
+      (*         (\*     | Some fpath -> find_module_type_in_lib ~library_modules fpath) *\) *)
+      (*         )) *)
+      (* | _ -> Ok None *)
+  | _ -> assert false
+
+and sig_of_module_type ~library_modules module_type =
+  let open CCResult.Infix in
+  let ( let> ) x f = match x with None -> Ok None | Some x -> f x in
+  match module_type with
+  | Types.Mty_alias path ->
+      (* let> path = Flat_path.from_path path in *)
+      let* mty_opt = find_module_in_lib ~library_modules path in
+      let> mty = mty_opt in
+      sig_of_module_type ~library_modules mty
+  | Mty_ident path ->
+      (* let> path = Flat_path.from_path path in *)
+      let* mty_opt = find_module_type_in_lib ~library_modules path in
+      let> mty = mty_opt in
+      sig_of_module_type ~library_modules mty
+  | Mty_signature sig_ -> Ok (Some sig_)
+  | Mty_functor _ -> Ok None
+
+(* let rec expand_sig ~library_modules sig_ = *)
+(*   let open Types in *)
+(*   let open CCResult.Infix in *)
+(*   CCResult.map_l *)
+(*     (fun item -> *)
+(*       match item with *)
+(*       | Sig_module (id, presence, ({ md_type; _ } as mod_decl), rs, vis) -> ( *)
+(*           match Flat_path.from_path path with *)
+(*           | None -> Ok item *)
+(*           | Some fpath -> ( *)
+(*               let* mty_opt = find_module_in_lib ~library_modules fpath in *)
+(*               match mty_opt with *)
+(*               | None -> Ok item *)
+(*               | Some mty -> *)
+(*                   let* expanded = *)
+(*                     match mty with *)
+(*                     | Mty_signature s -> *)
+(*                         let* expanded = expand_sig ~library_modules s in *)
+(*                         Ok (Mty_signature expanded) *)
+(*                     | _ -> Ok mty *)
+(*                   in *)
+(*                   let presence = *)
+(*                     match expanded with *)
+(*                     | Mty_alias _ -> presence *)
+(*                     | _ -> Mp_present *)
+(*                   in *)
+(*                   let mod_decl' = { mod_decl with md_type = expanded } in *)
+(*                   Ok (Sig_module (id, presence, mod_decl', rs, vis)))) *)
+(*       | Sig_module *)
+(*           (id, presence, ({ md_type = Mty_ident path; _ } as mod_decl), rs, vis) *)
+(*         -> *)
+(*           ignore (id, presence, path, mod_decl, rs, vis); *)
+(*           _ *)
+(*       | _ -> Ok item) *)
+(*     sig_ *)
+
+and expand_sig ~library_modules sig_ =
   let open Types in
   let open CCResult.Infix in
   CCResult.map_l
     (fun item ->
       match item with
-      | Sig_module
-          ( id,
-            presence,
-            ({ md_type = Mty_ident path | Mty_alias path; _ } as mod_decl),
-            rs,
-            vis ) -> (
-          match Flat_path.from_path path with
-          | None -> Ok item
-          | Some fpath -> (
-              let* mty_opt = find_module_in_lib ~library_modules fpath in
-              match mty_opt with
-              | None -> Ok item
-              | Some mty ->
-                  let* expanded =
-                    match mty with
-                    | Mty_signature s ->
-                        let* expanded = expand_sig ~library_modules s in
-                        Ok (Mty_signature expanded)
-                    | _ -> Ok mty
-                  in
-                  let presence =
-                    match expanded with
-                    | Mty_alias _ -> presence
-                    | _ -> Mp_present
-                  in
-                  let mod_decl' = { mod_decl with md_type = expanded } in
-                  Ok (Sig_module (id, presence, mod_decl', rs, vis))))
+      | Sig_module (id, presence, ({ md_type; _ } as mod_decl), rs, vis) ->
+          let* md_type = expand_module_type ~library_modules md_type in
+          let presence =
+            match md_type with
+            | Mty_alias _ -> presence
+            | _ -> Mp_present (* What is this fixing? *)
+          in
+          let mod_decl' = { mod_decl with md_type } in
+          Ok (Sig_module (id, presence, mod_decl', rs, vis))
       | _ -> Ok item)
     sig_
+
+and expand_module_type ~library_modules module_type =
+  let open CCResult.Infix in
+  let ( let> ) x f = match x with None -> Ok module_type | Some x -> f x in
+  let* sig_opt = sig_of_module_type ~library_modules module_type in
+  let> sig_ = sig_opt in
+  let* expanded = expand_sig ~library_modules sig_ in
+  Ok (Types.Mty_signature expanded)
 
 type t = Types.signature String_map.t
 
